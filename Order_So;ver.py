@@ -3,8 +3,9 @@ from itertools import count
 import sys
 
 # 【内部計算用の色マッピング】
-COLOR_MAP = {'？': -1, '封': -2, '赤': 0, '青': 1, '水': 2, '緑': 3, '黄': 4, '橙': 5, '紫': 6, '白': 7}
-INV_COLOR_MAP = {v: k for k, v in COLOR_MAP.items()}
+# -3 は「無（何色でもよい）」を表す特殊なIDとして追加
+COLOR_MAP = {'？': -1, '封': -2, '無': -3, '赤': 0, '青': 1, '水': 2, '緑': 3, '黄': 4, '橙': 5, '紫': 6, '白': 7}
+INV_COLOR_MAP = {v: k for k, v in COLOR_MAP.items() if v >= -2}
 
 def to_int_state(str_state):
     return tuple(tuple(COLOR_MAP[c] for c in b) for b in str_state)
@@ -22,7 +23,40 @@ def get_top_info(bottle):
         else: break
     return top_color, count
 
-def get_possible_moves(state, capacity, target_colors=None):
+def apply_unlocks(state, internal_closed, capacity):
+    """
+    現在の盤面状態を確認し、closedの条件を満たしている『封』があれば空ボトル()として解放する
+    """
+    if not internal_closed:
+        return state
+        
+    state_list = list(state)
+    completed_counts = {}
+    total_completed = 0
+    
+    # 完成しているボトルの数をカウント
+    for b in state_list:
+        if len(b) == capacity and all(c == b[0] for c in b) and b[0] not in (-1, -2):
+            completed_counts[b[0]] = completed_counts.get(b[0], 0) + 1
+            total_completed += 1
+            
+    changed = False
+    for idx, color_id, req in internal_closed:
+        # まだ『封』状態の場合のみ判定
+        if state_list[idx] and state_list[idx][0] == -2:
+            met = False
+            if color_id == -3: # 「無」の場合
+                met = total_completed >= req
+            else:              # 特定の色の指定がある場合
+                met = completed_counts.get(color_id, 0) >= req
+            
+            if met:
+                state_list[idx] = () # 条件達成で自動的に空ボトルへ解放
+                changed = True
+                
+    return tuple(state_list) if changed else state
+
+def get_possible_moves(state, capacity, target_colors=None, internal_closed=None):
     if target_colors is None: target_colors = set()
     next_states = []
     
@@ -53,14 +87,19 @@ def get_possible_moves(state, capacity, target_colors=None):
                 new_state = list(state)
                 new_state[i] = new_src
                 new_state[j] = new_dst
+                new_state_tuple = tuple(new_state)
+                
+                # ★ 新機能：移動後に条件を満たした『封』があれば自動解放する
+                new_state_tuple = apply_unlocks(new_state_tuple, internal_closed, capacity)
                 
                 action_cost = 10 
                 
-                a_bottle = new_state[i]
+                # 孤立化ペナルティ
+                a_bottle = new_state_tuple[i]
                 if a_bottle and a_bottle[-1] not in (-1, -2):
                     a_top = a_bottle[-1]
-                    has_empty = any(not b for b in new_state)
-                    has_match = any(k != i and b and b[0] != -2 and b[-1] == a_top for k, b in enumerate(new_state))
+                    has_empty = any(not b for b in new_state_tuple)
+                    has_match = any(k != i and b and b[0] != -2 and b[-1] == a_top for k, b in enumerate(new_state_tuple))
                     if not has_empty and not has_match:
                         action_cost += 100 
                 
@@ -71,7 +110,7 @@ def get_possible_moves(state, capacity, target_colors=None):
                         action_cost = 2  
                         
                 move_info = (i, j, move_amount, INV_COLOR_MAP[src_color])
-                next_states.append((tuple(new_state), move_info, action_cost))
+                next_states.append((new_state_tuple, move_info, action_cost))
                 
     return next_states
 
@@ -89,8 +128,12 @@ def count_completed(state, target_id, capacity):
     if target_id is None: return 0
     return sum(1 for b in state if len(b) == capacity and all(c == target_id for c in b))
 
-def solve(initial_str_state, capacity, mode="clear", target_colors=None):
+def solve(initial_str_state, capacity, mode="clear", target_colors=None, internal_closed=None):
     int_state = to_int_state(initial_str_state)
+    
+    # 探索開始直後にも自動解放をチェック（再開時など）
+    int_state = apply_unlocks(int_state, internal_closed, capacity)
+    
     tie_breaker = count()
     queue = [(0, next(tie_breaker), int_state, [])]
     visited = {int_state: 0}
@@ -119,7 +162,7 @@ def solve(initial_str_state, capacity, mode="clear", target_colors=None):
                 if iteration_count >= 5000: print()
                 return path, to_str_state(state)
 
-        for next_state, move_info, action_cost in get_possible_moves(state, capacity, target_colors):
+        for next_state, move_info, action_cost in get_possible_moves(state, capacity, target_colors, internal_closed):
             new_cost = current_cost + action_cost
             if next_state not in visited or new_cost < visited[next_state]:
                 visited[next_state] = new_cost
@@ -130,7 +173,7 @@ def solve(initial_str_state, capacity, mode="clear", target_colors=None):
 
 def print_board(state, capacity, layout):
     """
-    レイアウト表示のズレを修正（視覚的幅を7文字分に統一）
+    文字幅のズレを完全に修正。全ての列が視覚的に7文字幅になります。
     """
     max_rows = max(layout) if layout else 0
     num_cols = len(layout)
@@ -153,7 +196,7 @@ def print_board(state, capacity, layout):
                     else:
                         row_str += "[    ] "
                 else:
-                    row_str += "       "
+                    row_str += "       " # 7 spaces
             print(row_str)
             
         bottom_str = ""
@@ -161,8 +204,8 @@ def print_board(state, capacity, layout):
         for c, col_height in enumerate(layout):
             if r < col_height:
                 idx = sum(layout[:c]) + r
-                bottom_str += "------ "
-                num_str += f"  {idx:02d}   "
+                bottom_str += "------ "  # 6 hyphens + 1 space = 7
+                num_str += f"  {idx:02d}   " # 2 spaces + 2 digits + 3 spaces = 7
             else:
                 bottom_str += "       "
                 num_str += "       "
@@ -184,11 +227,11 @@ def update_master_board(master_board, current_state, exposed_indexes, new_colors
 
 def export_board(board, layout):
     """
-    スクリプトにそのまま貼り付けられるクリーンな形式で出力
+    そのままコピペして initial_board = (...) を上書きできるフォーマットで出力
     """
     print("\n" + "★"*60)
     print("【 現在の盤面データ (コピペ保存用) 】")
-    print("以下の `initial_board = (...)` のブロックを全てコピーし、")
+    print("以下の `initial_board = (` から `)` までを全てコピーし、")
     print("スクリプト下部の同じ箇所を上書きペーストしてください。")
     print("★"*60)
     
@@ -210,15 +253,25 @@ def export_board(board, layout):
     print("    )")
     print("★"*60 + "\n")
 
-def interactive_solver(master_initial_board, capacity, layout):
+def interactive_solver(master_initial_board, capacity, layout, closed_rules=None):
     if sum(layout) != len(master_initial_board):
         print(f"\n⚠️ 【警告】 LAYOUTの合計({sum(layout)}本)と、initial_boardのボトル数({len(master_initial_board)}本)が一致していません！\n")
+
+    # closedルールを内部IDに変換
+    internal_closed = []
+    if closed_rules:
+        for idx, col_str, req in closed_rules:
+            col_id = COLOR_MAP.get(col_str, -3) # 見つからなければ「無」扱い
+            internal_closed.append((idx, col_id, req))
 
     base_board = master_initial_board
     target_colors = set()
     
     while True:
-        current_state = base_board
+        # 開始時に最新の条件でアンロックを適用
+        current_state = to_str_state(apply_unlocks(to_int_state(base_board), internal_closed, capacity))
+        base_board = current_state
+        
         print("\n" + "★"*50)
         print("【 新しい探索（またはリスタート）を開始します 】")
         print("★"*50)
@@ -269,12 +322,12 @@ def interactive_solver(master_initial_board, capacity, layout):
                 mode = "clear"
                 print("探索開始: 【全情報判明】全クリアに向けて最短ルートを計算中...\n")
             
-            path, next_state = solve(current_state, capacity, mode, target_colors)
+            path, next_state = solve(current_state, capacity, mode, target_colors, internal_closed)
             
             if not path and mode == "prioritize":
                 print(f"⚠️ 現在の盤面では [{target_name}] を完成できません。先に '？' を開拓します。")
                 mode = "reveal" if has_any_unknown else "clear"
-                path, next_state = solve(current_state, capacity, mode, target_colors)
+                path, next_state = solve(current_state, capacity, mode, target_colors, internal_closed)
 
             if not path:
                 print("\n❌ 手詰まりです。これ以上、目標を達成できる手順が見つかりません。")
@@ -292,13 +345,19 @@ def interactive_solver(master_initial_board, capacity, layout):
                     src, dst, amount, color = move
                     print(f"  手順 {step_num}: ボトル {src:02d} から ボトル {dst:02d} へ [{color}] を {amount} つ移動")
                 
+                # 自動解錠があったかチェックして表示
+                unlocked_check = apply_unlocks(to_int_state(next_state), internal_closed, capacity)
+                if unlocked_check != to_int_state(next_state):
+                    print("  ✨ この手順を実行すると、条件を満たして自動的にロック(封)が解除されるボトルがあります！")
+                    next_state = to_str_state(unlocked_check)
+
                 if mode == "clear" and is_cleared(to_int_state(next_state), capacity):
                     print("\n🎉 全てのボトルが完成するルートです！")
             
             # ----------------------------------------------------
             # 拡張コマンドメニュー
             # ----------------------------------------------------
-            print("\n[Enter]:次へ  [R]:リスタート  [U]:ロック解除  [E]:編集  [P]:優先色  [X]:盤面データ出力  [Q]:終了")
+            print("\n[Enter]:次へ  [R]:リスタート  [U]:ロック手動解除  [E]:編集  [P]:優先色  [X]:盤面データ出力  [Q]:終了")
             action = input("-> ").strip().lower()
             
             if action == 'q': return
@@ -312,9 +371,9 @@ def interactive_solver(master_initial_board, capacity, layout):
                 continue
                  
             elif action == 'u':
-                print("\n【 ロック(封)解除モード 】")
+                print("\n【 ロック(封)手動解除モード 】")
                 try:
-                    unlock_idx = int(input("カップや広告が消えて解放されたボトルの番号を入力: "))
+                    unlock_idx = int(input("解放されたボトルの番号を入力: "))
                     if 0 <= unlock_idx < len(current_state) and current_state[unlock_idx] and current_state[unlock_idx][0] == '封':
                         print(f"\nボトル {unlock_idx:02d} のロックを解除します。")
                         print("解放されたボトルの『最初の中身』を下から順にカンマ区切りで入力してください。")
@@ -369,13 +428,17 @@ def interactive_solver(master_initial_board, capacity, layout):
 
 
 # ==========================================
-# 実行部分（レベル67を想定した設定例）
+# 実行部分
 # ==========================================
 if __name__ == "__main__":
     
     CAPACITY = 4
     LAYOUT = [4, 3, 3, 4, 3, 3, 4]
-    closed = [(3,"緑", 2), (11,"水",1), (15,"無",3)]
+    
+    # ★ 新機能：解放条件の定義
+    # (ボトル番号, "色", 必要な完成本数)
+    # "無" は何色でもいいので完成した総数を意味します。
+    closed = [(3, "緑", 2), (11, "水", 1), (15, "無", 3)]
 
     initial_board = (
         # --- 列 0 (左から 1 列目) ---
@@ -417,4 +480,4 @@ if __name__ == "__main__":
         ('封', '封', '封', '封'), # 23
     )
 
-    interactive_solver(initial_board, CAPACITY, LAYOUT)
+    interactive_solver(initial_board, CAPACITY, LAYOUT, closed_rules=closed)
