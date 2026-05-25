@@ -3,7 +3,6 @@ from itertools import count
 import sys
 
 # 【内部計算用の色マッピング】
-# -3 は「無（何色でもよい）」を表す特殊なIDとして追加
 COLOR_MAP = {'？': -1, '封': -2, '無': -3, '赤': 0, '青': 1, '水': 2, '緑': 3, '黄': 4, '橙': 5, '紫': 6, '白': 7}
 INV_COLOR_MAP = {v: k for k, v in COLOR_MAP.items() if v >= -2}
 
@@ -24,17 +23,12 @@ def get_top_info(bottle):
     return top_color, count
 
 def apply_unlocks(state, internal_closed, capacity):
-    """
-    現在の盤面状態を確認し、closedの条件を満たしている『封』があれば空ボトル()として解放する
-    """
-    if not internal_closed:
-        return state
+    if not internal_closed: return state
         
     state_list = list(state)
     completed_counts = {}
     total_completed = 0
     
-    # 完成しているボトルの数をカウント
     for b in state_list:
         if len(b) == capacity and all(c == b[0] for c in b) and b[0] not in (-1, -2):
             completed_counts[b[0]] = completed_counts.get(b[0], 0) + 1
@@ -42,22 +36,20 @@ def apply_unlocks(state, internal_closed, capacity):
             
     changed = False
     for idx, color_id, req in internal_closed:
-        # まだ『封』状態の場合のみ判定
         if state_list[idx] and state_list[idx][0] == -2:
             met = False
-            if color_id == -3: # 「無」の場合
-                met = total_completed >= req
-            else:              # 特定の色の指定がある場合
-                met = completed_counts.get(color_id, 0) >= req
+            if color_id == -3: met = total_completed >= req
+            else: met = completed_counts.get(color_id, 0) >= req
             
             if met:
-                state_list[idx] = () # 条件達成で自動的に空ボトルへ解放
+                state_list[idx] = () 
                 changed = True
                 
     return tuple(state_list) if changed else state
 
 def get_possible_moves(state, capacity, target_colors=None, internal_closed=None):
     if target_colors is None: target_colors = set()
+    closed_indexes = {c[0] for c in internal_closed} if internal_closed else set()
     next_states = []
     
     for i in range(len(state)):
@@ -89,7 +81,7 @@ def get_possible_moves(state, capacity, target_colors=None, internal_closed=None
                 new_state[j] = new_dst
                 new_state_tuple = tuple(new_state)
                 
-                # ★ 新機能：移動後に条件を満たした『封』があれば自動解放する
+                # 移動後に条件を満たした『封』があれば自動解放（仮想）する
                 new_state_tuple = apply_unlocks(new_state_tuple, internal_closed, capacity)
                 
                 action_cost = 10 
@@ -104,10 +96,14 @@ def get_possible_moves(state, capacity, target_colors=None, internal_closed=None
                         action_cost += 100 
                 
                 if src_color in target_colors:
-                    if len(new_dst) == capacity and all(c == src_color for c in new_dst):
-                        action_cost = 0  
-                    else:
-                        action_cost = 2  
+                    if len(new_dst) == capacity and all(c == src_color for c in new_dst): action_cost = 0  
+                    else: action_cost = 2  
+                
+                # ★【新機能】自動解放ボトルの利用ペナルティ（後回しロジック）
+                # Uコマンドで手動解放されていない「条件待ち」のボトルを使うルートには
+                # 非常に重いコストをかけ、ギリギリまで別のルートを探させる
+                if i in closed_indexes or j in closed_indexes:
+                    action_cost += 500  
                         
                 move_info = (i, j, move_amount, INV_COLOR_MAP[src_color])
                 next_states.append((new_state_tuple, move_info, action_cost))
@@ -130,8 +126,6 @@ def count_completed(state, target_id, capacity):
 
 def solve(initial_str_state, capacity, mode="clear", target_colors=None, internal_closed=None):
     int_state = to_int_state(initial_str_state)
-    
-    # 探索開始直後にも自動解放をチェック（再開時など）
     int_state = apply_unlocks(int_state, internal_closed, capacity)
     
     tie_breaker = count()
@@ -172,16 +166,11 @@ def solve(initial_str_state, capacity, mode="clear", target_colors=None, interna
     return None, None
 
 def print_board(state, capacity, layout):
-    """
-    文字幅のズレを完全に修正。全ての列が視覚的に7文字幅になります。
-    """
     max_rows = max(layout) if layout else 0
     num_cols = len(layout)
-    
     print("\n" + "="*(num_cols * 7))
     print(f"【 現在の盤面状態 】")
     print("="*(num_cols * 7))
-    
     for r in range(max_rows):
         for layer in range(capacity - 1, -1, -1):
             row_str = ""
@@ -193,26 +182,22 @@ def print_board(state, capacity, layout):
                         color = str(bottle[layer])
                         if color == '封': row_str += f"[ 封 ] "
                         else: row_str += f"[{color:^3}] " if len(color) == 1 else f"[{color:^2}] "
-                    else:
-                        row_str += "[    ] "
-                else:
-                    row_str += "       " # 7 spaces
+                    else: row_str += "[    ] "
+                else: row_str += "       " 
             print(row_str)
-            
         bottom_str = ""
         num_str = ""
         for c, col_height in enumerate(layout):
             if r < col_height:
                 idx = sum(layout[:c]) + r
-                bottom_str += "------ "  # 6 hyphens + 1 space = 7
-                num_str += f"  {idx:02d}   " # 2 spaces + 2 digits + 3 spaces = 7
+                bottom_str += "------ "  
+                num_str += f"  {idx:02d}   " 
             else:
                 bottom_str += "       "
                 num_str += "       "
         print(bottom_str)
         print(num_str)
         print() 
-        
     print("="*(num_cols * 7) + "\n")
 
 def update_master_board(master_board, current_state, exposed_indexes, new_colors):
@@ -226,25 +211,19 @@ def update_master_board(master_board, current_state, exposed_indexes, new_colors
     return tuple(new_master)
 
 def export_board(board, layout):
-    """
-    そのままコピペして initial_board = (...) を上書きできるフォーマットで出力
-    """
     print("\n" + "★"*60)
     print("【 現在の盤面データ (コピペ保存用) 】")
     print("以下の `initial_board = (` から `)` までを全てコピーし、")
     print("スクリプト下部の同じ箇所を上書きペーストしてください。")
     print("★"*60)
-    
     print("    initial_board = (")
     idx = 0
     for c, col_height in enumerate(layout):
         print(f"        # --- 列 {c} (左から {c+1} 列目) ---")
         for r in range(col_height):
             bottle = board[idx]
-            if not bottle:
-                print(f"        (), # {idx:02d}")
-            elif len(bottle) == 1:
-                print(f"        ('{bottle[0]}',), # {idx:02d}")
+            if not bottle: print(f"        (), # {idx:02d}")
+            elif len(bottle) == 1: print(f"        ('{bottle[0]}',), # {idx:02d}")
             else:
                 contents = ", ".join(f"'{color}'" for color in bottle)
                 print(f"        ({contents}), # {idx:02d}")
@@ -257,18 +236,16 @@ def interactive_solver(master_initial_board, capacity, layout, closed_rules=None
     if sum(layout) != len(master_initial_board):
         print(f"\n⚠️ 【警告】 LAYOUTの合計({sum(layout)}本)と、initial_boardのボトル数({len(master_initial_board)}本)が一致していません！\n")
 
-    # closedルールを内部IDに変換
     internal_closed = []
     if closed_rules:
         for idx, col_str, req in closed_rules:
-            col_id = COLOR_MAP.get(col_str, -3) # 見つからなければ「無」扱い
+            col_id = COLOR_MAP.get(col_str, -3) 
             internal_closed.append((idx, col_id, req))
 
     base_board = master_initial_board
     target_colors = set()
     
     while True:
-        # 開始時に最新の条件でアンロックを適用
         current_state = to_str_state(apply_unlocks(to_int_state(base_board), internal_closed, capacity))
         base_board = current_state
         
@@ -306,8 +283,7 @@ def interactive_solver(master_initial_board, capacity, layout, closed_rules=None
                 if not skip_input and new_colors_input:
                     base_board = update_master_board(base_board, current_state, exposed, new_colors_input)
                     continue
-                elif skip_input:
-                    continue
+                elif skip_input: continue
                 
             has_any_unknown = any('？' in b for b in current_state)
             
@@ -345,10 +321,10 @@ def interactive_solver(master_initial_board, capacity, layout, closed_rules=None
                     src, dst, amount, color = move
                     print(f"  手順 {step_num}: ボトル {src:02d} から ボトル {dst:02d} へ [{color}] を {amount} つ移動")
                 
-                # 自動解錠があったかチェックして表示
                 unlocked_check = apply_unlocks(to_int_state(next_state), internal_closed, capacity)
                 if unlocked_check != to_int_state(next_state):
-                    print("  ✨ この手順を実行すると、条件を満たして自動的にロック(封)が解除されるボトルがあります！")
+                    print("  ✨ 盤面上で条件を満たし、自動的にロックが解除されたボトルがあります！")
+                    print("  ⚠️ （※実機でオーダーが通らずまだ解放されていない場合は、他の手を優先してください）")
                     next_state = to_str_state(unlocked_check)
 
                 if mode == "clear" and is_cleared(to_int_state(next_state), capacity):
@@ -357,15 +333,13 @@ def interactive_solver(master_initial_board, capacity, layout, closed_rules=None
             # ----------------------------------------------------
             # 拡張コマンドメニュー
             # ----------------------------------------------------
-            print("\n[Enter]:次へ  [R]:リスタート  [U]:ロック手動解除  [E]:編集  [P]:優先色  [X]:盤面データ出力  [Q]:終了")
+            print("\n[Enter]:次へ  [R]:リスタート  [U]:ロック手動解除(実機同期)  [E]:編集  [P]:優先色  [X]:データ出力  [Q]:終了")
             action = input("-> ").strip().lower()
             
             if action == 'q': return
-                
             elif action == 'r':
                  print("\n🔄 ゲームをリスタートし、学習した情報を引き継いで初期状態からやり直します。")
                  break 
-            
             elif action == 'x':
                 export_board(base_board, layout)
                 continue
@@ -373,9 +347,9 @@ def interactive_solver(master_initial_board, capacity, layout, closed_rules=None
             elif action == 'u':
                 print("\n【 ロック(封)手動解除モード 】")
                 try:
-                    unlock_idx = int(input("解放されたボトルの番号を入力: "))
-                    if 0 <= unlock_idx < len(current_state) and current_state[unlock_idx] and current_state[unlock_idx][0] == '封':
-                        print(f"\nボトル {unlock_idx:02d} のロックを解除します。")
+                    unlock_idx = int(input("実機で解放されたボトルの番号を入力: "))
+                    if 0 <= unlock_idx < len(current_state):
+                        print(f"\nボトル {unlock_idx:02d} のロックを完全に解除します。")
                         print("解放されたボトルの『最初の中身』を下から順にカンマ区切りで入力してください。")
                         print("（完全に空ボトルの場合は、何も入力せずそのままEnter）")
                         new_contents_str = input(f"ボトル {unlock_idx:02d} の中身: ").strip()
@@ -391,9 +365,13 @@ def interactive_solver(master_initial_board, capacity, layout, closed_rules=None
                         temp_base = list(base_board)
                         temp_base[unlock_idx] = new_bottle
                         base_board = tuple(temp_base)
-                        print(f"\n➡️ ボトル {unlock_idx:02d} を解放しました！")
+                        
+                        # ★ 実機で解放されたので、ペナルティ対象から完全に除外する
+                        internal_closed = [c for c in internal_closed if c[0] != unlock_idx]
+                        
+                        print(f"\n➡️ ボトル {unlock_idx:02d} が正規の空きボトルとして組み込まれました！以後は最優先で活用されます。")
                     else:
-                        print("⚠️ その番号は『封』状態ではありません。")
+                        print("⚠️ 無効な番号です。")
                 except ValueError: pass
                 continue
 
@@ -426,58 +404,50 @@ def interactive_solver(master_initial_board, capacity, layout, closed_rules=None
             current_state = next_state
 
 
+# ==========================================
+# 実行部分（レベル70）
+# ==========================================
 
-# ==========================================
-# 実行部分
-# ==========================================
 if __name__ == "__main__":
-    
     CAPACITY = 4
-    LAYOUT = [4, 3, 3, 4, 3, 3, 4]
+    LAYOUT = [4, 3, 3, 3, 3, 4]
     
-    # ★ 新機能：解放条件の定義
-    # (ボトル番号, "色", 必要な完成本数)
-    # "無" は何色でもいいので完成した総数を意味します。
-    closed = [(3, "緑", 2), (11, "水", 1), (15, "無", 3)]
+    # 封印解除条件
+    # カップのラベルから、左は「黄」2本、右は「橙」2本と推測されます。
+    closed = [(9, "黄", 2), (12, "橙", 2)]
 
     initial_board = (
         # --- 列 0 (左から 1 列目) ---
-        ('赤', '緑', '青', '白'), # 00
-        ('橙', '紫', '赤'), # 01
-        ('？', '水', '紫'), # 02
+        ('赤', '青', '紫', '黄'), # 00
+        ('？', '紫', '白', '青'), # 01
+        ('？', '白', '赤', '黄'), # 02
         ('封', '封', '封', '封'), # 03
 
         # --- 列 1 (左から 2 列目) ---
-        ('緑', '紫', '赤', '白'), # 04
-        ('橙', '白', '橙', '緑'), # 05
-        ('黄', '緑', '青'), # 06
+        ('水', '緑', '黄'), # 04
+        ('青', '橙', '水', '白'), # 05
+        ('赤', '黄', '白', '黄'), # 06
 
         # --- 列 2 (左から 3 列目) ---
-        ('青', '青', '赤', '白'), # 07
-        ('封', '封', '封', '封'), # 08
-        ('青', '水', '赤'), # 09
+        ('青', '橙', '赤', '赤'), # 07
+        ('赤', '水', '紫', '紫'), # 08
+        ('封', '封', '封', '封'), # 09
 
         # --- 列 3 (左から 4 列目) ---
-        ('水', '赤', '赤', '橙'), # 10
-        ('？', '水', '橙', '緑'), # 11
+        ('水', '青', '赤', '青'), # 10
+        ('？', '白', '黄', '黄'), # 11
         ('封', '封', '封', '封'), # 12
-        ('？', '？', '緑', '水'), # 13
 
         # --- 列 4 (左から 5 列目) ---
-        ('緑', '緑', '青', '白'), # 14
-        ('封', '封', '封', '封'), # 15
-        ('赤', '緑', '青'), # 16
+        ('？', '水', '紫', '紫'), # 13
+        ('？', '？', '橙', '青'), # 14
+        ('？', '紫', '水', '赤'), # 15
 
         # --- 列 5 (左から 6 列目) ---
-        ('？', '青', '黄', '白'), # 17
-        ('？', '？', '白', '紫'), # 18
-        ('水', '青', '水'), # 19
-
-        # --- 列 6 (左から 7 列目) ---
-        ('？', '紫', '緑', '紫'), # 20
-        ('？', '橙', '紫'), # 21
-        ('？', '黄', '緑'), # 22
-        ('封', '封', '封', '封'), # 23
+        ('封', '封', '封', '封'), # 16
+        ('？', '緑', '橙'), # 17
+        ('？', '橙', '橙', '黄'), # 18
+        (), # 19
     )
 
     interactive_solver(initial_board, CAPACITY, LAYOUT, closed_rules=closed)
