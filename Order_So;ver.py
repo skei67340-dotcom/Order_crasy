@@ -22,16 +22,14 @@ def get_top_info(bottle):
         else: break
     return top_color, count
 
-# ★【修正箇所】不要なINV_COLOR_MAPの変換を削除し、直接color_strとして受け取る
 def apply_path_to_state_str(state, path, steps, capacity, memory_str):
     new_state = list(state)
     for step_num in range(min(steps, len(path))):
-        src, dst, amount, color_str = path[step_num] # ←ここで直接文字列を受け取る
+        src, dst, amount, color_str = path[step_num] 
         
         src_bottle = list(new_state[src])
         new_state[src] = tuple(src_bottle[:-amount]) if amount < len(src_bottle) else ()
         
-        # 移動後に露出した『？』が記憶にあれば実体化させる
         temp_src = list(new_state[src])
         while temp_src and temp_src[-1] == '？':
             layer = len(temp_src) - 1
@@ -46,9 +44,40 @@ def apply_path_to_state_str(state, path, steps, capacity, memory_str):
         
     return tuple(new_state)
 
-def get_possible_moves(state, capacity, target_colors=None, internal_closed=None, memory_int=None):
+def check_and_apply_unlocks(state_list, capacity, internal_closed, known_cups_int, memory_int):
+    completed_counts = {}
+    total_completed = 0
+    for b in state_list:
+        if len(b) == capacity and all(c == b[0] for c in b) and b[0] not in (-1, -2):
+            completed_counts[b[0]] = completed_counts.get(b[0], 0) + 1
+            total_completed += 1
+
+    for idx, col_id, req in internal_closed:
+        if state_list[idx] and state_list[idx][0] == -2:
+            met = False
+            if col_id == -3:
+                met = total_completed >= req
+            else:
+                met = completed_counts.get(col_id, 0) >= req
+
+            if met:
+                if idx in known_cups_int:
+                    temp_b = list(known_cups_int[idx])
+                    while temp_b and temp_b[-1] == -1:
+                        l = len(temp_b) - 1
+                        if (idx, l) in memory_int:
+                            temp_b[-1] = memory_int[(idx, l)]
+                        else:
+                            break
+                    state_list[idx] = tuple(temp_b)
+                else:
+                    state_list[idx] = (-1,)
+
+def get_possible_moves(state, capacity, target_colors=None, internal_closed=None, memory_int=None, known_cups_int=None, simulate_unlocks=False):
     if target_colors is None: target_colors = set()
     if memory_int is None: memory_int = {}
+    if known_cups_int is None: known_cups_int = {}
+    
     closed_indexes = {c[0] for c in internal_closed} if internal_closed else set()
     next_states = []
     
@@ -94,8 +123,11 @@ def get_possible_moves(state, capacity, target_colors=None, internal_closed=None
                 new_state = list(state)
                 new_state[i] = new_src
                 new_state[j] = new_dst
-                new_state_tuple = tuple(new_state)
                 
+                if simulate_unlocks and internal_closed:
+                    check_and_apply_unlocks(new_state, capacity, internal_closed, known_cups_int, memory_int)
+                
+                new_state_tuple = tuple(new_state)
                 action_cost = 10 
                 
                 a_bottle = new_state_tuple[i]
@@ -135,13 +167,33 @@ def count_completed(state, target_id, capacity):
         return 0
     return sum(1 for b in state if len(b) == capacity and all(c == target_id for c in b))
 
-def solve(initial_str_state, capacity, mode="clear", target_colors=None, internal_closed=None, memory_str=None):
+def get_heuristic(state, capacity, target_colors=None):
+    h_cost = 0
+    closed_count = sum(1 for b in state if b and b[0] == -2)
+    h_cost += closed_count * 500
+    
+    if target_colors:
+        max_comp = 0
+        for tid in target_colors:
+            comp = count_completed(state, tid, capacity)
+            if comp > max_comp:
+                max_comp = comp
+        h_cost -= max_comp * 200
+        
+    return h_cost
+
+def solve(initial_str_state, capacity, mode="clear", target_colors=None, internal_closed=None, memory_str=None, known_cups_str=None, simulate_unlocks=True):
     int_state = to_int_state(initial_str_state)
     
     memory_int = {}
     if memory_str:
         for k, v in memory_str.items():
             memory_int[k] = COLOR_MAP[v]
+            
+    known_cups_int = {}
+    if known_cups_str:
+        for k, v in known_cups_str.items():
+            known_cups_int[k] = tuple(COLOR_MAP[c] for c in v)
             
     initial_list = []
     for i, b in enumerate(int_state):
@@ -156,45 +208,65 @@ def solve(initial_str_state, capacity, mode="clear", target_colors=None, interna
     int_state = tuple(initial_list)
 
     tie_breaker = count()
-    queue = [(0, next(tie_breaker), int_state, [])]
-    visited = {int_state: 0}
+    
+    initial_h = get_heuristic(int_state, capacity, target_colors)
+    queue = [(initial_h, 0, next(tie_breaker), int_state, [])] 
+    visited = {int_state: 0} 
     
     initial_unknowns = len(get_exposed_unknowns(int_state))
+    initial_closed_count = sum(1 for b in int_state if b and b[0] == -2)
     
     initial_completions = {}
-    if mode in ("prioritize", "unlock") and target_colors:
+    if mode == "prioritize" and target_colors:
         for tid in target_colors:
             initial_completions[tid] = count_completed(int_state, tid, capacity)
             
     iteration_count = 0 
+    MAX_ITER = 30000 
 
     while queue:
         iteration_count += 1
-        current_cost, _, state, path = heapq.heappop(queue)
+        f_cost, current_g_cost, _, state, path = heapq.heappop(queue)
 
         if iteration_count % 5000 == 0:
-            print(f"\r⏳ 計算中... (探索済みパターン: {len(visited):,} | 現在の探索深さ: {current_cost})", end="", flush=True)
+            print(f"\r⏳ 計算中... (探索済みパターン: {len(visited):,} | 現在の手数深さ: {len(path)})", end="", flush=True)
 
-        if mode in ("prioritize", "unlock") and target_colors:
+        if mode == "prioritize" and target_colors:
             for tid in target_colors:
                 if count_completed(state, tid, capacity) > initial_completions[tid]:
-                    if iteration_count >= 5000: print()
+                    if iteration_count >= MAX_ITER: print()
                     return path, to_str_state(state)
+                    
         elif mode == "clear" and is_cleared(state, capacity):
-            if iteration_count >= 5000: print()
+            if iteration_count >= MAX_ITER: print()
             return path, to_str_state(state)
+            
         elif mode == "reveal":
             if len(get_exposed_unknowns(state)) > initial_unknowns:
-                if iteration_count >= 5000: print()
+                if iteration_count >= MAX_ITER: print()
+                return path, to_str_state(state)
+                
+        elif mode == "unlock_reveal":
+            if len(get_exposed_unknowns(state)) > initial_unknowns:
+                if iteration_count >= MAX_ITER: print()
+                return path, to_str_state(state)
+            
+            current_closed_count = sum(1 for b in state if b and b[0] == -2)
+            if current_closed_count < initial_closed_count:
+                if iteration_count >= MAX_ITER: print()
                 return path, to_str_state(state)
 
-        for next_state, move_info, action_cost in get_possible_moves(state, capacity, target_colors, internal_closed, memory_int):
-            new_cost = current_cost + action_cost
-            if next_state not in visited or new_cost < visited[next_state]:
-                visited[next_state] = new_cost
-                heapq.heappush(queue, (new_cost, next(tie_breaker), next_state, path + [move_info]))
+        for next_state, move_info, action_cost in get_possible_moves(state, capacity, target_colors, internal_closed, memory_int, known_cups_int, simulate_unlocks):
+            new_g_cost = current_g_cost + action_cost
+            if next_state not in visited or new_g_cost < visited[next_state]:
+                visited[next_state] = new_g_cost
+                
+                h_cost = get_heuristic(next_state, capacity, target_colors)
+                new_f_cost = new_g_cost + h_cost
+                
+                heapq.heappush(queue, (new_f_cost, new_g_cost, next(tie_breaker), next_state, path + [move_info]))
 
-    if iteration_count >= 5000: print()
+    if iteration_count >= MAX_ITER: print()
     return None, None
 
 def print_board(state, capacity, layout, internal_closed=None):
@@ -374,40 +446,20 @@ def interactive_solver(master_initial_board, capacity, layout, closed_rules=None
             target_colors_for_solve = set(target_colors) if target_colors else set()
             
             if target_colors:
-                mode = "prioritize"
-                target_name = INV_COLOR_MAP[list(target_colors)[0]]
-                print(f"探索開始: [手動] [{target_name}] の完成を最優先で計算中...\n")
-            elif has_any_unknown:
-                mode = "reveal"
-                print("探索開始: [フェーズ1] '？' の開拓を目標に計算中...\n")
-            elif unmet_rules:
-                mode = "unlock"
-                target_colors_for_solve = {rule[1] for rule in unmet_rules}
-                names = list(dict.fromkeys([f"ボトル{rule[0]:02d}({rule[2]})" for rule in unmet_rules]))
-                print(f"探索開始: [フェーズ2] 封印解除のため [{', '.join(names)}] の完成を最優先で計算中...\n")
+                print(f"探索開始: [手動] 指定された色の完成を最優先で計算中...\n")
+                path, next_state = solve(current_state, capacity, mode="prioritize", target_colors=target_colors_for_solve, internal_closed=internal_closed, memory_str=memory_unknowns_str, known_cups_str=known_cup_contents, simulate_unlocks=True)
             else:
-                mode = "clear"
-                print("探索開始: [フェーズ3] 【全条件達成】全クリアに向けて最短ルートを計算中...\n")
-            
-            path, next_state = solve(current_state, capacity, mode, target_colors_for_solve, internal_closed, memory_unknowns_str)
-            
-            if not path:
-                if mode == "prioritize":
-                    print(f"⚠️ 現在の盤面では手動指定された色を完成できません。")
-                    if has_any_unknown:
-                        print("➡️ 別の '？' を開拓するルートを検索します...")
-                        mode = "reveal"
-                        path, next_state = solve(current_state, capacity, mode, set(), internal_closed, memory_unknowns_str)
+                print("探索開始: [フェーズ1] 盤面の '？' の開拓を目標に計算中...")
+                path, next_state = solve(current_state, capacity, mode="reveal", target_colors=set(), internal_closed=internal_closed, memory_str=memory_unknowns_str, known_cups_str=known_cup_contents, simulate_unlocks=False)
                 
-                elif mode == "reveal" and unmet_rules:
+                if not path and unmet_rules:
                     print("\n⚠️ 現在の盤面ではこれ以上 '？' を開拓できません。")
-                    print("➡️ 盤面を広げるため、[フェーズ2] カップの開封(オーダー達成)に移行します。")
-                    
-                    print("【 解放待ちのカップ 】")
+                    print("➡️ [フェーズ2] カップを開封し、連鎖的に盤面を広げて『？』を露出させるルートを計算します。")
+                    print("【 開放候補のカップ 】")
                     for rule in unmet_rules:
                         print(f"  - ボトル {rule[0]:02d} (条件: {rule[2]})")
                         
-                    cup_choice = input("優先して開けたいカップの番号を入力してください (そのままEnterで自動探索): ").strip()
+                    cup_choice = input("優先して開けたいカップの番号を入力してください (そのままEnterでソルバーが自動で最適探索): ").strip()
                     
                     target_colors_for_solve = set()
                     target_names = []
@@ -423,9 +475,18 @@ def interactive_solver(master_initial_board, capacity, layout, closed_rules=None
                         target_colors_for_solve = {rule[1] for rule in unmet_rules}
                         target_names = [f"ボトル{rule[0]:02d}({rule[2]})" for rule in unmet_rules]
                         
-                    mode = "unlock"
-                    print(f"\n探索開始: [フェーズ2移行] {', '.join(target_names)} の封印解除を最優先で計算中...\n")
-                    path, next_state = solve(current_state, capacity, mode, target_colors_for_solve, internal_closed, memory_unknowns_str)
+                    mode = "unlock_reveal"
+                    print(f"\n探索開始: [フェーズ2移行] {', '.join(target_names)} などの封印解除を通じて『？』を露出させるルートを計算中...\n")
+                    path, next_state = solve(current_state, capacity, mode="unlock_reveal", target_colors=target_colors_for_solve, internal_closed=internal_closed, memory_str=memory_unknowns_str, known_cups_str=known_cup_contents, simulate_unlocks=True)
+                    
+                    if not path:
+                        print("\n⚠️ どのカップを解除するルートも見つかりませんでした（または中に？がありません）。")
+                        print("➡️ [フェーズ3] 可能な範囲で盤面を整理し、クリアを目指すルートを検索します...")
+                        path, next_state = solve(current_state, capacity, mode="clear", target_colors=set(), internal_closed=internal_closed, memory_str=memory_unknowns_str, known_cups_str=known_cup_contents, simulate_unlocks=True)
+
+                elif not path and not unmet_rules:
+                    print("探索開始: [フェーズ3] 【全条件達成】全クリアに向けて最短ルートを計算中...\n")
+                    path, next_state = solve(current_state, capacity, mode="clear", target_colors=set(), internal_closed=internal_closed, memory_str=memory_unknowns_str, known_cups_str=known_cup_contents, simulate_unlocks=True)
 
             if not path:
                 print("\n❌ 手詰まりです。これ以上、目標を達成できる手順が見つかりません。")
@@ -443,22 +504,56 @@ def interactive_solver(master_initial_board, capacity, layout, closed_rules=None
                     src, dst, amount, color = move
                     print(f"  手順 {step_num}: ボトル {src:02d} から ボトル {dst:02d} へ [{color}] を {amount} つ移動")
                 
-                if mode == "clear" and is_cleared(to_int_state(next_state), capacity):
-                    print("\n🎉 全てのボトルが完成するルートです！")
+                print("\n💡 【重要】手順の途中でカップが開いた場合は、そこで実行を止めて [U] コマンドで盤面を同期し、再計算させてください！")
             
             # ----------------------------------------------------
             # 拡張コマンドメニュー
             # ----------------------------------------------------
-            print("\n[Enter]:次へ  [R]:リスタート  [U]:実機ロック解除  [E]:編集  [P]:優先色  [X]:データ出力  [Q]:終了")
-            action = input("-> ").strip().lower()
+            # ★【新機能】コマンド入力をメニューループ化し、Sコマンドを追加
+            while True:
+                print("\n[Enter]:次へ  [R]:リスタート  [U]:実機ロック解除  [E]:編集  [P]:優先色  [S]:状況確認  [X]:データ出力  [Q]:終了")
+                action = input("-> ").strip().lower()
+                
+                if action == 's':
+                    print("\n=================================================")
+                    print("【 現在の状況確認 】")
+                    print("=================================================")
+                    print_board(current_state, capacity, layout, internal_closed)
+                    
+                    if memory_unknowns_str:
+                        print("💡 【 判明している『？』の記憶一覧 】")
+                        memory_by_bottle = {}
+                        for (b_idx, layer), color in memory_unknowns_str.items():
+                            if b_idx not in memory_by_bottle:
+                                memory_by_bottle[b_idx] = []
+                            memory_by_bottle[b_idx].append((layer, color))
+                        for b_idx in sorted(memory_by_bottle.keys()):
+                            items = sorted(memory_by_bottle[b_idx])
+                            mem_str = ", ".join([f"下から{l+1}層目:[{c}]" for l, c in items])
+                            print(f"  ボトル {b_idx:02d} -> {mem_str}")
+                    else:
+                        print("💡 判明している『？』の記憶はまだありません。")
+                        
+                    if internal_closed:
+                        print("\n🔒 【 ロック(閉)の解除待ち条件 】")
+                        for idx, col_id, req in internal_closed:
+                            col_name = "無（何色でも）" if col_id == -3 else INV_COLOR_MAP[col_id]
+                            print(f"  ボトル {idx:02d} -> 条件: {col_name} を {req} 本完成")
+                    print("=================================================\n")
+                    continue
+                    
+                elif action == 'x':
+                    export_board(base_board, layout, memory_unknowns_str, known_cup_contents)
+                    continue
+                    
+                else:
+                    break
             
+            # --- 以下は状態が変わるコマンド ---
             if action == 'q': return
             elif action == 'r':
                  print("\n🔄 ゲームをリスタートし、学習した情報を引き継いで初期状態からやり直します。")
                  break 
-            elif action == 'x':
-                export_board(base_board, layout, memory_unknowns_str, known_cup_contents)
-                continue
                  
             elif action == 'u':
                 print("\n【 ロック(閉)手動解除モード 】")
@@ -549,60 +644,154 @@ def interactive_solver(master_initial_board, capacity, layout, closed_rules=None
 
             current_state = next_state
 
+
+
 # ==========================================
-# 実行部分（レベル92）
+# 実行部分（レベル108）
 # ==========================================
 if __name__ == "__main__":
     
     CAPACITY = 4
-    LAYOUT = [4, 3, 3, 2, 3, 3, 4]
-    
-    known_memory = {}
-    known_cup_contents = {}
-    
+    LAYOUT = [3, 3, 4, 4, 4, 3, 3]
+
     closed = [
-        (0, "緑", 1), (1, "白", 3), (2, "赤", 1), 
-        (19, "白", 5), (20, "橙", 1), (21, "紫", 1) 
+        (6, "無", 4), (9, "黄", 2), 
+        (10, "無", 5), (13, "緑", 2), 
+        (14, "無", 4), (17, "青", 2)
     ]
+    
+    # Xコマンドで出力された known_memory と known_cup_contents を貼り付けられます
+    known_memory = {
+        (0, 2): '青',
+        (3, 2): '水',
+        (7, 2): '黄',
+        (7, 1): '黄',
+        (11, 2): '青',
+        (21, 2): '緑',
+        (18, 2): '青',
+        (11, 1): '黄',
+        (7, 0): '緑',
+        (21, 1): '緑',
+        (21, 0): '橙',
+        (4, 1): '緑',
+        (8, 1): '紫',
+        (15, 2): '紫',
+        (15, 1): '黄',
+        (15, 0): '白',
+        (5, 0): '水',
+        (19, 1): '橙',
+        (3, 1): '黄',
+        (12, 1): '青',
+        (0, 1): '青',
+        (11, 0): '水',
+        (1, 1): '青',
+        (16, 1): '水',
+        (16, 0): '赤',
+        (22, 1): '緑',
+        (18, 1): '青',
+        (22, 0): '青',
+        (0, 0): '緑',
+    }
+
+    known_cup_contents = {
+    }
 
     initial_board = (
         # --- 列 0 (左から 1 列目) ---
-        ('？', '？', '白', '赤'), # 00
-        ('？', '？', '白', '青'), # 01
-        ('？', '白', '赤', '黄'), # 02
-        ('封', '封', '封', '封'), # 03
+        ('？', '？', '？', '白'), # 00
+        ('？', '？', '赤', '水'), # 01
+        ('封', '封', '封', '封'), # 02
 
         # --- 列 1 (左から 2 列目) ---
-        ('？', '緑', '緑', '黄'), # 04
-        ('青', '橙', '水', '白'), # 05
-        ('黄', '赤', '白', '黄'), # 06
+        ('？', '？', '？', '赤'), # 03
+        ('？', '？', '赤', '緑'), # 04
+        ('？', '白'), # 05
 
         # --- 列 2 (左から 3 列目) ---
-        ('青', '橙', '赤', '赤'), # 07
-        ('赤', '水', '紫', '紫'), # 08
-        ('？', '橙', '紫', '赤'), # 09
+        ('封', '封', '封', '封'), # 06
+        ('？', '？', '？', '黄'), # 07
+        ('？', '？', '赤', '青'), # 08
+        ('封', '封', '封', '封'), # 09
 
         # --- 列 3 (左から 4 列目) ---
-        ('青', '緑'), # 10
-        ('緑', '紫'), # 11
+        ('封', '封', '封', '封'), # 10
+        ('？', '？', '？', '青'), # 11
+        ('？', '？', '赤'), # 12
+        ('封', '封', '封', '封'), # 13
 
         # --- 列 4 (左から 5 列目) ---
-        ('水', '青', '赤', '緑'), # 12
-        ('黄', '白', '黄', '白'), # 13
-        ('赤', '青', '紫', '黄'), # 14
+        ('封', '封', '封', '封'), # 14
+        ('？', '？', '？', '紫'), # 15
+        ('？', '？', '水', '青'), # 16
+        ('封', '封', '封', '封'), # 17
 
         # --- 列 5 (左から 6 列目) ---
-        ('白', '紫', '紫', '水'), # 15
-        ('水', '青', '橙', '青'), # 16
-        ('紫', '水', '赤', '赤'), # 17
+        ('？', '？', '？', '赤'), # 18
+        ('？', '？', '水', '黄'), # 19
+        ('？', '黄'), # 20
 
         # --- 列 6 (左から 7 列目) ---
-        ('封', '封', '封', '封'), # 18
-        ('？', '？', '？', '緑'), # 19
-        ('？', '？', '？', '黄'), # 20
-        ('紫', '緑', '紫', '紫'), # 21
+        ('？', '？', '？', '白'), # 21
+        ('？', '？', '赤', '水'), # 22
+        ('封', '封', '封', '封'), # 23
 
     )
 
     interactive_solver(initial_board, CAPACITY, LAYOUT, closed_rules=closed, loaded_memory=known_memory, loaded_cups=known_cup_contents)
 
+# # ==========================================
+# # 実行部分（ここから下を書き換えてください）
+# # ==========================================
+# if __name__ == "__main__":
+    
+#     CAPACITY = 4
+#     LAYOUT = [4, 3, 3, 2, 3, 3, 4]
+    
+#     known_memory = {}
+#     known_cup_contents = {}
+    
+#     closed = [
+#         (0, "緑", 1), (1, "白", 3), (2, "赤", 1), 
+#         (19, "白", 5), (20, "橙", 1), (21, "紫", 1) 
+#     ]
+
+#     initial_board = (
+#         # --- 列 0 (左から 1 列目) ---
+#         ('？', '？', '白', '赤'), # 00
+#         ('？', '？', '白', '青'), # 01
+#         ('？', '白', '赤', '黄'), # 02
+#         ('封', '封', '封', '封'), # 03
+
+#         # --- 列 1 (左から 2 列目) ---
+#         ('水', '緑', '緑', '黄'), # 04
+#         ('青', '橙', '水', '白'), # 05
+#         ('黄', '赤', '白', '黄'), # 06
+
+#         # --- 列 2 (左から 3 列目) ---
+#         ('青', '橙', '赤', '赤'), # 07
+#         ('赤', '水', '紫', '紫'), # 08
+#         ('橙', '橙', '紫', '赤'), # 09
+
+#         # --- 列 3 (左から 4 列目) ---
+#         ('青', '緑'), # 10
+#         ('緑', '紫'), # 11
+
+#         # --- 列 4 (左から 5 列目) ---
+#         ('水', '青', '赤', '緑'), # 12
+#         ('黄', '白', '黄', '白'), # 13
+#         ('赤', '青', '紫', '黄'), # 14
+
+#         # --- 列 5 (左から 6 列目) ---
+#         ('白', '紫', '紫', '水'), # 15
+#         ('水', '青', '橙', '青'), # 16
+#         ('紫', '水', '赤', '赤'), # 17
+
+#         # --- 列 6 (左から 7 列目) ---
+#         (), # 18
+#         ('？', '？', '？', '緑'), # 19
+#         ('？', '？', '？', '黄'), # 20
+#         ('紫', '緑', '紫', '紫'), # 21
+
+#     )
+
+#     interactive_solver(initial_board, CAPACITY, LAYOUT, closed_rules=closed, loaded_memory=known_memory, loaded_cups=known_cup_contents)
